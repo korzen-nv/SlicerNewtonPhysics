@@ -32,6 +32,34 @@ class NewtonPhysics(ScriptedLoadableModule):
 class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
     SEG_LAST_PATH_KEY = "NewtonPhysics/SegmentationLastPath"
 
+    ABDOMEN_ATLAS_NAMES = {
+        1: "aorta",
+        2: "gall_bladder",
+        3: "kidney_left",
+        4: "kidney_right",
+        5: "liver",
+        6: "pancreas",
+        7: "postcava",
+        8: "spleen",
+        9: "stomach",
+        10: "adrenal_gland_left",
+        11: "adrenal_gland_right",
+        12: "bladder",
+        13: "celiac_trunk",
+        14: "colon",
+        15: "duodenum",
+        16: "esophagus",
+        17: "femur_left",
+        18: "femur_right",
+        19: "hepatic_vessel",
+        20: "intestine",
+        21: "lung_left",
+        22: "lung_right",
+        23: "portal_vein_and_splenic_vein",
+        24: "prostate",
+        25: "rectum",
+    }
+
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
 
@@ -151,9 +179,45 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
         quickLoadRow.addWidget(self.loadSegButton)
         sbForm.addRow("Quick-load file:", quickLoadRow)
 
-        self.segSelector = slicer.qMRMLSegmentSelectorWidget()
-        self.segSelector.setMRMLScene(slicer.mrmlScene)
-        sbForm.addRow("Segment:", self.segSelector)
+        self.segNodeSelector = slicer.qMRMLNodeComboBox()
+        self.segNodeSelector.nodeTypes = ["vtkMRMLSegmentationNode"]
+        self.segNodeSelector.selectNodeUponCreation = True
+        self.segNodeSelector.addEnabled = False
+        self.segNodeSelector.removeEnabled = False
+        self.segNodeSelector.noneEnabled = True
+        self.segNodeSelector.showHidden = False
+        self.segNodeSelector.setMRMLScene(slicer.mrmlScene)
+        sbForm.addRow("Segmentation:", self.segNodeSelector)
+
+        self.segTable = qt.QTableWidget()
+        self.segTable.setColumnCount(5)
+        self.segTable.setHorizontalHeaderLabels(
+            ["Sim", "Lock", "Segment", "Color", "Stiffness ke (N/m)"]
+        )
+        header = self.segTable.horizontalHeader()
+        header.setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, qt.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, qt.QHeaderView.Stretch)
+        header.setSectionResizeMode(3, qt.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, qt.QHeaderView.ResizeToContents)
+        self.segTable.verticalHeader().setVisible(False)
+        self.segTable.setSelectionMode(qt.QAbstractItemView.NoSelection)
+        self.segTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.segTable.setMinimumHeight(180)
+        self.segTable.toolTip = (
+            "Per-segment controls. Sim = include in simulation. Lock = freeze all "
+            "particles in this segment (mass=0, e.g. bones). Color = surface mesh "
+            "color. Stiffness = spring ke (N/m) passed to Newton's add_spring."
+        )
+        sbForm.addRow(self.segTable)
+
+        self.renameAtlasButton = qt.QPushButton("Apply AbdomenAtlas names")
+        self.renameAtlasButton.toolTip = (
+            "Rename segments in the current segmentation using AbdomenAtlas "
+            "label values (1=aorta, 2=gall_bladder, ...). Label value is parsed "
+            "from the current segment name; falls back to row order."
+        )
+        sbForm.addRow(self.renameAtlasButton)
 
         self.spacingSpin = qt.QDoubleSpinBox()
         self.spacingSpin.setRange(1.0, 40.0)
@@ -166,13 +230,6 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
         self.connCombo.addItems(["6", "18", "26"])
         self.connCombo.setCurrentText("18")
         sbForm.addRow("Connectivity:", self.connCombo)
-
-        self.stiffnessSpin = qt.QDoubleSpinBox()
-        self.stiffnessSpin.setRange(0.0, 100.0)
-        self.stiffnessSpin.setDecimals(1)
-        self.stiffnessSpin.setValue(10.0)
-        self.stiffnessSpin.setSuffix(" N/m")
-        sbForm.addRow("Spring stiffness ke:", self.stiffnessSpin)
 
         self.dampingSpin = qt.QDoubleSpinBox()
         self.dampingSpin.setRange(0.0, 1000.0)
@@ -247,6 +304,10 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
         self.resetButton.connect("clicked(bool)", self.onReset)
         self.showSurfaceCheck.connect("toggled(bool)", self._onShowSurface)
         self.showParticlesCheck.connect("toggled(bool)", self._onShowParticles)
+        self.segNodeSelector.connect(
+            "currentNodeChanged(vtkMRMLNode*)", self._onSegmentationChanged
+        )
+        self.renameAtlasButton.connect("clicked(bool)", self.onApplyAbdomenAtlasNames)
 
         self._refreshInstallStatus()
         self._refreshSimButtons(sceneReady=False, playing=False)
@@ -305,26 +366,144 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
             return
         qt.QSettings().setValue(self.SEG_LAST_PATH_KEY, path)
         self.segFilePath.addCurrentPathToHistory()
-        self.segSelector.setCurrentNode(segNode)
+        self.segNodeSelector.setCurrentNode(segNode)
         segIds = vtk.vtkStringArray()
         segNode.GetSegmentation().GetSegmentIDs(segIds)
-        if segIds.GetNumberOfValues() > 0:
-            self.segSelector.setCurrentSegmentID(segIds.GetValue(0))
         self.statusLabel.text = (
             f"Loaded '{segNode.GetName()}' with "
             f"{segIds.GetNumberOfValues()} segment(s)."
         )
 
+    def _onSegmentationChanged(self, node):
+        self.segTable.setRowCount(0)
+        if node is None:
+            return
+        segIds = vtk.vtkStringArray()
+        node.GetSegmentation().GetSegmentIDs(segIds)
+        for i in range(segIds.GetNumberOfValues()):
+            segId = segIds.GetValue(i)
+            segment = node.GetSegmentation().GetSegment(segId)
+            name = segment.GetName() if segment else segId
+            color = segment.GetColor() if segment else (0.92, 0.55, 0.45)
+            self._appendSegmentRow(segId, name, color)
+
+    @staticmethod
+    def _makeCheckCell(checked):
+        chk = qt.QCheckBox()
+        chk.setChecked(bool(checked))
+        cell = qt.QWidget()
+        lay = qt.QHBoxLayout(cell)
+        lay.addWidget(chk)
+        lay.setAlignment(qt.Qt.AlignCenter)
+        lay.setContentsMargins(0, 0, 0, 0)
+        return cell, chk
+
+    def _appendSegmentRow(self, segId, name, color):
+        row = self.segTable.rowCount
+        self.segTable.insertRow(row)
+
+        simCell, _ = self._makeCheckCell(checked=True)
+        self.segTable.setCellWidget(row, 0, simCell)
+
+        lockCell, _ = self._makeCheckCell(checked=False)
+        self.segTable.setCellWidget(row, 1, lockCell)
+
+        nameItem = qt.QTableWidgetItem(name)
+        nameItem.setData(qt.Qt.UserRole, segId)
+        self.segTable.setItem(row, 2, nameItem)
+
+        colorBtn = ctk.ctkColorPickerButton()
+        colorBtn.displayColorName = False
+        colorBtn.color = qt.QColor.fromRgbF(
+            float(color[0]), float(color[1]), float(color[2])
+        )
+        colorBtn.connect(
+            "colorChanged(QColor)",
+            lambda c, sid=segId: self.logic.setBodyColor(
+                sid, (c.redF(), c.greenF(), c.blueF())
+            ),
+        )
+        self.segTable.setCellWidget(row, 3, colorBtn)
+
+        stiffSpin = qt.QDoubleSpinBox()
+        stiffSpin.setRange(0.0, 10000.0)
+        stiffSpin.setDecimals(1)
+        stiffSpin.setValue(10.0)
+        stiffSpin.setSuffix(" N/m")
+        self.segTable.setCellWidget(row, 4, stiffSpin)
+
+    def _collectCheckedSegments(self):
+        segments = []
+        for row in range(self.segTable.rowCount):
+            simCell = self.segTable.cellWidget(row, 0)
+            simChk = simCell.findChild(qt.QCheckBox) if simCell else None
+            if simChk is None or not simChk.isChecked():
+                continue
+            lockCell = self.segTable.cellWidget(row, 1)
+            lockChk = lockCell.findChild(qt.QCheckBox) if lockCell else None
+            nameItem = self.segTable.item(row, 2)
+            colorBtn = self.segTable.cellWidget(row, 3)
+            stiffSpin = self.segTable.cellWidget(row, 4)
+            c = colorBtn.color
+            segments.append({
+                "id": nameItem.data(qt.Qt.UserRole),
+                "name": nameItem.text(),
+                "locked": bool(lockChk and lockChk.isChecked()),
+                "color": (c.redF(), c.greenF(), c.blueF()),
+                "stiffness_ke": float(stiffSpin.value),
+            })
+        return segments
+
+    @staticmethod
+    def _parseLabelValue(name, fallback):
+        import re
+        m = re.search(r"\d+", name or "")
+        if m:
+            try:
+                return int(m.group(0))
+            except ValueError:
+                pass
+        return fallback
+
+    def onApplyAbdomenAtlasNames(self):
+        node = self.segNodeSelector.currentNode()
+        if node is None:
+            slicer.util.errorDisplay("Select a segmentation first.")
+            return
+        renamed = 0
+        segmentation = node.GetSegmentation()
+        for row in range(self.segTable.rowCount):
+            nameItem = self.segTable.item(row, 2)
+            if nameItem is None:
+                continue
+            segId = nameItem.data(qt.Qt.UserRole)
+            label = self._parseLabelValue(nameItem.text(), fallback=row + 1)
+            newName = self.ABDOMEN_ATLAS_NAMES.get(label)
+            if newName is None:
+                continue
+            segment = segmentation.GetSegment(segId)
+            if segment is None:
+                continue
+            segment.SetName(newName)
+            nameItem.setText(newName)
+            renamed += 1
+        self.statusLabel.text = (
+            f"Renamed {renamed} segment(s) using AbdomenAtlas names."
+        )
+
     def onPrepareSoftBody(self):
-        segNode = self.segSelector.currentNode()
-        segmentId = self.segSelector.currentSegmentID()
-        if not segNode or not segmentId:
-            slicer.util.errorDisplay("Select a segmentation and a segment first.")
+        segNode = self.segNodeSelector.currentNode()
+        if segNode is None:
+            slicer.util.errorDisplay("Select a segmentation first.")
+            return
+        segments = self._collectCheckedSegments()
+        if not segments:
+            slicer.util.errorDisplay("Check at least one segment to simulate.")
             return
         with slicer.util.tryWithErrorDisplay("Soft body build failed", waitCursor=True):
-            self.logic.setupSoftBodyFromSegment(
+            self.logic.setupSoftBodyFromSegments(
                 segNode=segNode,
-                segmentId=segmentId,
+                segments=segments,
                 device=self.deviceCombo.currentText,
                 fps=self.fpsSpin.value,
                 dt_ms=self.timestepSpin.value,
@@ -333,7 +512,6 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
                 auxViewer=self.auxViewerCombo.currentText,
                 spacing_mm=self.spacingSpin.value,
                 connectivity=int(self.connCombo.currentText),
-                stiffness_ke=self.stiffnessSpin.value,
                 damping_kd=self.dampingSpin.value,
                 density=self.densitySpin.value,
                 pin_top=self.pinTopCheck.isChecked(),
@@ -343,7 +521,8 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
         self.logic.setSurfaceVisible(self.showSurfaceCheck.isChecked())
         self.logic.setParticlesVisible(self.showParticlesCheck.isChecked())
         self.statusLabel.text = (
-            f"Soft body ready ({self.logic.particleCount()} particles, "
+            f"Soft body ready ({len(segments)} body(ies), "
+            f"{self.logic.particleCount()} particles, "
             f"{self.logic.springCount()} springs). Press Play."
         )
         self._refreshSimButtons(sceneReady=True, playing=False)
@@ -414,12 +593,8 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         self._sphereTransformNode = None
         self._groundModelNode = None
 
-        self._softSurfaceNode = None
-        self._softSurfaceRestMm = None
-        self._particleVizNode = None
+        self._softBodies = []
         self._particlesRestM = None
-        self._skinIdxs = None
-        self._skinWeights = None
 
     # ------------------------------------------------------------- install --
     @staticmethod
@@ -543,10 +718,10 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         self._logToAuxViewer()
 
     # ------------------------------------------------------------- soft body
-    def setupSoftBodyFromSegment(
+    def setupSoftBodyFromSegments(
         self,
         segNode,
-        segmentId,
+        segments,
         device,
         fps,
         dt_ms,
@@ -555,7 +730,6 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         auxViewer,
         spacing_mm,
         connectivity,
-        stiffness_ke,
         damping_kd,
         density,
         pin_top,
@@ -564,60 +738,96 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
     ):
         import newton
         import warp as wp
+        from newton import ParticleFlags
 
         self.reset()
+        if not segments:
+            raise RuntimeError("No segments selected.")
         wp.set_device(device)
         self._applyTiming(fps, dt_ms, substeps)
 
-        imagedata, ijk_to_ras = self._exportSegmentLabelmap(segNode, segmentId)
-        positions_m, grid_ijk, spacing_m = self._particleGridFromLabelmap(
-            imagedata, ijk_to_ras, spacing_mm
-        )
-        P = positions_m.shape[0]
-        if P == 0:
-            raise RuntimeError("Segment has no voxels at the chosen spacing.")
-        if P > self.SOFTBODY_MAX_PARTICLES:
+        bodies = []
+        for seg in segments:
+            imagedata, ijk_to_ras = self._exportSegmentLabelmap(segNode, seg["id"])
+            positions_m, grid_ijk, spacing_m = self._particleGridFromLabelmap(
+                imagedata, ijk_to_ras, spacing_mm
+            )
+            if positions_m.shape[0] == 0:
+                raise RuntimeError(
+                    f"Segment '{seg['name']}' has no voxels at the chosen spacing."
+                )
+            locked = bool(seg.get("locked", False))
+            if locked:
+                pinned_mask = np.ones(positions_m.shape[0], dtype=bool)
+            else:
+                pinned_mask = self._pinMask(positions_m, spacing_m, pin_top)
+            bodies.append({
+                "segment_id": seg["id"],
+                "name": seg["name"],
+                "stiffness_ke": float(seg["stiffness_ke"]),
+                "color": tuple(seg.get("color", (0.92, 0.55, 0.45))),
+                "locked": locked,
+                "imagedata": imagedata,
+                "ijk_to_ras": ijk_to_ras,
+                "positions_m": positions_m,
+                "grid_ijk": grid_ijk,
+                "spacing_m": spacing_m,
+                "pinned_mask": pinned_mask,
+            })
+
+        total_particles = sum(b["positions_m"].shape[0] for b in bodies)
+        if total_particles > self.SOFTBODY_MAX_PARTICLES:
             raise RuntimeError(
-                f"{P} particles exceeds the limit of {self.SOFTBODY_MAX_PARTICLES}. "
-                f"Increase particle spacing."
+                f"{total_particles} particles exceeds the limit of "
+                f"{self.SOFTBODY_MAX_PARTICLES}. Increase particle spacing "
+                f"or uncheck segments."
             )
 
-        pinned_mask = self._pinMask(positions_m, spacing_m, pin_top)
-        particle_mass = float(density) * (spacing_m ** 3)
-        masses = np.where(pinned_mask, 0.0, particle_mass).astype(np.float32)
-
         builder = newton.ModelBuilder()
-        particle_radius = max(spacing_m * 0.49, 1e-4)
-        builder.default_particle_radius = particle_radius
+        min_spacing_m = min(b["spacing_m"] for b in bodies)
+        builder.default_particle_radius = max(min_spacing_m * 0.49, 1e-4)
         if not pin_top:
-            builder.add_ground_plane()
-
-        from newton import ParticleFlags
+            global_min_z = min(float(b["positions_m"][:, 2].min()) for b in bodies)
+            builder.add_ground_plane(height=global_min_z - 2.0 * min_spacing_m)
 
         active_flags = int(ParticleFlags.ACTIVE)
         pinned_flags = active_flags & ~int(ParticleFlags.ACTIVE)
-        for i in range(P):
-            p = positions_m[i]
-            flags = pinned_flags if pinned_mask[i] else active_flags
-            builder.add_particle(
-                pos=(float(p[0]), float(p[1]), float(p[2])),
-                vel=(0.0, 0.0, 0.0),
-                mass=float(masses[i]),
-                radius=particle_radius,
-                flags=flags,
-            )
 
-        if disable_springs:
-            self._spring_count = 0
-        else:
-            edges = self._enumerateGridEdges(grid_ijk, connectivity)
-            for i, j in edges:
-                builder.add_spring(
-                    int(i), int(j),
-                    ke=float(stiffness_ke), kd=float(damping_kd), control=0.0,
+        total_spring_count = 0
+        for body in bodies:
+            positions_m = body["positions_m"]
+            pinned_mask = body["pinned_mask"]
+            spacing_m = body["spacing_m"]
+            particle_mass = float(density) * (spacing_m ** 3)
+            masses = np.where(pinned_mask, 0.0, particle_mass).astype(np.float32)
+            radius_body = max(spacing_m * 0.49, 1e-4)
+
+            body["particle_offset"] = builder.particle_count
+            body["particle_count"] = positions_m.shape[0]
+
+            for i in range(positions_m.shape[0]):
+                p = positions_m[i]
+                flags = pinned_flags if pinned_mask[i] else active_flags
+                builder.add_particle(
+                    pos=(float(p[0]), float(p[1]), float(p[2])),
+                    vel=(0.0, 0.0, 0.0),
+                    mass=float(masses[i]),
+                    radius=radius_body,
+                    flags=flags,
                 )
-            self._spring_count = len(edges)
 
+            if not disable_springs:
+                edges = self._enumerateGridEdges(body["grid_ijk"], connectivity)
+                offset = body["particle_offset"]
+                ke = body["stiffness_ke"]
+                for i, j in edges:
+                    builder.add_spring(
+                        int(i) + offset, int(j) + offset,
+                        ke=float(ke), kd=float(damping_kd), control=0.0,
+                    )
+                total_spring_count += len(edges)
+
+        self._spring_count = total_spring_count
         self._model = builder.finalize()
         if not self_collide:
             self._model.particle_max_radius = 0.0
@@ -634,33 +844,56 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         if self._auxViewer is not None:
             self._auxViewer.set_model(self._model)
 
-        surfacePolyData, surface_pts_mm = self._extractSurfaceMesh(imagedata, ijk_to_ras)
-        particle_pts_mm = positions_m * self.SCENE_SCALE_MM
-        idxs, weights = self._computeSkinWeights(
-            surface_pts_mm, particle_pts_mm, self.SOFTBODY_SKIN_K
-        )
+        global_rest_m = np.zeros((total_particles, 3), dtype=np.float32)
+        body_records = []
+        for body in bodies:
+            positions_m = body["positions_m"]
+            offset = body["particle_offset"]
+            count = body["particle_count"]
+            global_rest_m[offset:offset + count] = positions_m
 
-        self._particlesRestM = positions_m.astype(np.float32)
-        self._softSurfaceRestMm = surface_pts_mm.astype(np.float32)
-        self._skinIdxs = idxs
-        self._skinWeights = weights.astype(np.float32)
+            surfacePolyData, surface_pts_mm = self._extractSurfaceMesh(
+                body["imagedata"], body["ijk_to_ras"]
+            )
+            particle_pts_mm = positions_m * self.SCENE_SCALE_MM
+            idxs, weights = self._computeSkinWeights(
+                surface_pts_mm, particle_pts_mm, self.SOFTBODY_SKIN_K
+            )
 
-        self._softSurfaceNode = slicer.mrmlScene.AddNewNodeByClass(
-            "vtkMRMLModelNode", "NewtonSoftBody"
-        )
-        self._softSurfaceNode.SetAndObservePolyData(surfacePolyData)
-        self._softSurfaceNode.CreateDefaultDisplayNodes()
-        disp = self._softSurfaceNode.GetDisplayNode()
-        disp.SetColor(0.92, 0.55, 0.45)
-        disp.SetOpacity(0.9)
+            surface_node = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLModelNode", f"NewtonSoftBody_{body['name']}"
+            )
+            surface_node.SetAndObservePolyData(surfacePolyData)
+            surface_node.CreateDefaultDisplayNodes()
+            disp = surface_node.GetDisplayNode()
+            disp.SetScalarVisibility(False)
+            disp.SetColor(*body["color"])
+            disp.SetOpacity(0.9)
 
-        self._buildParticleVizNode(particle_pts_mm)
+            particle_viz_node = self._buildParticleVizNode(
+                particle_pts_mm, name=f"NewtonParticles_{body['name']}"
+            )
+
+            body_records.append({
+                "segment_id": body["segment_id"],
+                "name": body["name"],
+                "offset": offset,
+                "count": count,
+                "surface_node": surface_node,
+                "surface_rest_mm": surface_pts_mm.astype(np.float32),
+                "particle_viz_node": particle_viz_node,
+                "skin_idxs": idxs,
+                "skin_weights": weights.astype(np.float32),
+            })
+
+        self._particlesRestM = global_rest_m
+        self._softBodies = body_records
 
         self._mode = self.MODE_SOFTBODY
         self._pushSoftBodyToMrml()
         self._logToAuxViewer()
 
-    def _buildParticleVizNode(self, positions_mm):
+    def _buildParticleVizNode(self, positions_mm, name="NewtonParticles"):
         pts = vtk.vtkPoints()
         pts.SetNumberOfPoints(positions_mm.shape[0])
         for i, p in enumerate(positions_mm):
@@ -671,24 +904,37 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         vgf.SetInputData(pd)
         vgf.Update()
 
-        self._particleVizNode = slicer.mrmlScene.AddNewNodeByClass(
-            "vtkMRMLModelNode", "NewtonParticles"
-        )
-        self._particleVizNode.SetAndObservePolyData(vgf.GetOutput())
-        self._particleVizNode.CreateDefaultDisplayNodes()
-        d = self._particleVizNode.GetDisplayNode()
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", name)
+        node.SetAndObservePolyData(vgf.GetOutput())
+        node.CreateDefaultDisplayNodes()
+        d = node.GetDisplayNode()
         d.SetRepresentation(0)  # 0 = VTK_POINTS
         d.SetPointSize(5.0)
         d.SetColor(0.2, 0.85, 0.25)
         d.SetVisibility(False)
+        return node
 
     def setSurfaceVisible(self, on):
-        if self._softSurfaceNode is not None:
-            self._softSurfaceNode.GetDisplayNode().SetVisibility(bool(on))
+        for body in self._softBodies:
+            node = body.get("surface_node")
+            if node is not None:
+                node.GetDisplayNode().SetVisibility(bool(on))
 
     def setParticlesVisible(self, on):
-        if self._particleVizNode is not None:
-            self._particleVizNode.GetDisplayNode().SetVisibility(bool(on))
+        for body in self._softBodies:
+            node = body.get("particle_viz_node")
+            if node is not None:
+                node.GetDisplayNode().SetVisibility(bool(on))
+
+    def setBodyColor(self, segment_id, rgb):
+        for body in self._softBodies:
+            if body.get("segment_id") != segment_id:
+                continue
+            node = body.get("surface_node")
+            if node is None:
+                return
+            node.GetDisplayNode().SetColor(float(rgb[0]), float(rgb[1]), float(rgb[2]))
+            return
 
     # ---------------------------------------------------- aux viewer plumbing
     @staticmethod
@@ -955,24 +1201,31 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         return idxs, dists
 
     def _pushSoftBodyToMrml(self):
-        if self._state_0 is None:
+        if self._state_0 is None or not self._softBodies:
             return
         particles_m = self._state_0.particle_q.numpy().astype(np.float32)
         particles_mm = particles_m * self.SCENE_SCALE_MM
+        disp_m_global = particles_m - self._particlesRestM
 
-        if self._particleVizNode is not None:
-            parr = slicer.util.arrayFromModelPoints(self._particleVizNode)
-            parr[:] = particles_mm
-            slicer.util.arrayFromModelPointsModified(self._particleVizNode)
+        for body in self._softBodies:
+            off, cnt = body["offset"], body["count"]
+            body_particles_mm = particles_mm[off:off + cnt]
 
-        if self._softSurfaceNode is not None and self._particlesRestM is not None:
-            disp_mm = (particles_m - self._particlesRestM) * self.SCENE_SCALE_MM
-            gathered = disp_mm[self._skinIdxs]
-            surface_disp_mm = (self._skinWeights[..., None] * gathered).sum(axis=1)
-            current_mm = self._softSurfaceRestMm + surface_disp_mm.astype(np.float32)
-            arr = slicer.util.arrayFromModelPoints(self._softSurfaceNode)
-            arr[:] = current_mm
-            slicer.util.arrayFromModelPointsModified(self._softSurfaceNode)
+            viz = body.get("particle_viz_node")
+            if viz is not None:
+                parr = slicer.util.arrayFromModelPoints(viz)
+                parr[:] = body_particles_mm
+                slicer.util.arrayFromModelPointsModified(viz)
+
+            surface_node = body.get("surface_node")
+            if surface_node is not None:
+                disp_mm = disp_m_global[off:off + cnt] * self.SCENE_SCALE_MM
+                gathered = disp_mm[body["skin_idxs"]]
+                surface_disp_mm = (body["skin_weights"][..., None] * gathered).sum(axis=1)
+                current_mm = body["surface_rest_mm"] + surface_disp_mm.astype(np.float32)
+                arr = slicer.util.arrayFromModelPoints(surface_node)
+                arr[:] = current_mm
+                slicer.util.arrayFromModelPointsModified(surface_node)
 
     # ---------------------------------------------------------------- loop --
     def _applyTiming(self, fps, dt_ms, substeps):
@@ -1037,8 +1290,8 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         if self._mode == self.MODE_SOFTBODY:
             q = self._state_0.particle_q.numpy()
             return (
-                f"frame={self._frame}  P={q.shape[0]}  "
-                f"<z>={float(q[:, 2].mean()):+.3f} m"
+                f"frame={self._frame}  bodies={len(self._softBodies)}  "
+                f"P={q.shape[0]}  <z>={float(q[:, 2].mean()):+.3f} m"
             )
         return f"frame={self._frame}"
 
@@ -1058,13 +1311,15 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
                 self._auxViewer.close()
             except Exception:
                 pass
-        for node in (
+        nodes = [
             self._sphereModelNode,
             self._sphereTransformNode,
             self._groundModelNode,
-            self._softSurfaceNode,
-            self._particleVizNode,
-        ):
+        ]
+        for body in self._softBodies:
+            nodes.append(body.get("surface_node"))
+            nodes.append(body.get("particle_viz_node"))
+        for node in nodes:
             if node is not None:
                 slicer.mrmlScene.RemoveNode(node)
         self._reset_runtime()

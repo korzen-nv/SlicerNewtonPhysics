@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# CMake and extension build artifacts
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS files
+.DS_Store
+Thumbs.db
