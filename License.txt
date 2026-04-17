@@ -1,0 +1,5 @@
+Apache License, Version 2.0
+https://www.apache.org/licenses/LICENSE-2.0
+
+This extension wraps the Newton physics engine (Apache-2.0) for use inside
+3D Slicer. See https://github.com/newton-physics/newton for Newton itself.
