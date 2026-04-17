@@ -243,7 +243,7 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
         sbForm.addRow("Density:", self.densitySpin)
 
         self.pinTopCheck = qt.QCheckBox("Pin top layer (body hangs under gravity)")
-        self.pinTopCheck.setChecked(True)
+        self.pinTopCheck.setChecked(False)
         sbForm.addRow(self.pinTopCheck)
 
         self.disableSpringsCheck = qt.QCheckBox(
@@ -252,13 +252,26 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
         sbForm.addRow(self.disableSpringsCheck)
 
         self.selfCollideCheck = qt.QCheckBox("Particle self-collision")
-        self.selfCollideCheck.setChecked(False)
+        self.selfCollideCheck.setChecked(True)
         self.selfCollideCheck.toolTip = (
             "When off, particles pass through each other. Keep on for normal "
             "soft bodies. Turn off to isolate spring/gravity behaviour or if "
             "self-collision is driving instability."
         )
         sbForm.addRow(self.selfCollideCheck)
+
+        self.radiusFactorSpin = qt.QDoubleSpinBox()
+        self.radiusFactorSpin.setRange(0.05, 0.5)
+        self.radiusFactorSpin.setSingleStep(0.05)
+        self.radiusFactorSpin.setDecimals(2)
+        self.radiusFactorSpin.setValue(0.35)
+        self.radiusFactorSpin.toolTip = (
+            "Particle collision radius as a fraction of particle spacing. "
+            "0.5 = neighbours just touch at rest (explodes under any compression). "
+            "0.3–0.4 is usually stable with self-collision on. "
+            "Also used for ground-plane contact."
+        )
+        sbForm.addRow("Particle radius (× spacing):", self.radiusFactorSpin)
 
         displayRow = qt.QHBoxLayout()
         self.showSurfaceCheck = qt.QCheckBox("Surface")
@@ -270,7 +283,7 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
         displayRow.addStretch(1)
         sbForm.addRow(displayRow)
 
-        self.prepareSoftButton = qt.QPushButton("Prepare soft body")
+        self.prepareSoftButton = qt.QPushButton("Init Sim")
         sbForm.addRow(self.prepareSoftButton)
 
         # --- Playback -------------------------------------------------------
@@ -517,6 +530,7 @@ class NewtonPhysicsWidget(ScriptedLoadableModuleWidget):
                 pin_top=self.pinTopCheck.isChecked(),
                 disable_springs=self.disableSpringsCheck.isChecked(),
                 self_collide=self.selfCollideCheck.isChecked(),
+                particle_radius_factor=self.radiusFactorSpin.value,
             )
         self.logic.setSurfaceVisible(self.showSurfaceCheck.isChecked())
         self.logic.setParticlesVisible(self.showParticlesCheck.isChecked())
@@ -735,6 +749,7 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
         pin_top,
         disable_springs=False,
         self_collide=True,
+        particle_radius_factor=0.35,
     ):
         import newton
         import warp as wp
@@ -785,7 +800,8 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
 
         builder = newton.ModelBuilder()
         min_spacing_m = min(b["spacing_m"] for b in bodies)
-        builder.default_particle_radius = max(min_spacing_m * 0.49, 1e-4)
+        radius_factor = float(particle_radius_factor)
+        builder.default_particle_radius = max(min_spacing_m * radius_factor, 1e-4)
         if not pin_top:
             global_min_z = min(float(b["positions_m"][:, 2].min()) for b in bodies)
             builder.add_ground_plane(height=global_min_z - 2.0 * min_spacing_m)
@@ -800,7 +816,7 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
             spacing_m = body["spacing_m"]
             particle_mass = float(density) * (spacing_m ** 3)
             masses = np.where(pinned_mask, 0.0, particle_mass).astype(np.float32)
-            radius_body = max(spacing_m * 0.49, 1e-4)
+            radius_body = max(spacing_m * radius_factor, 1e-4)
 
             body["particle_offset"] = builder.particle_count
             body["particle_count"] = positions_m.shape[0]
@@ -1051,44 +1067,64 @@ class NewtonPhysicsLogic(ScriptedLoadableModuleLogic):
 
         dims = imagedata.GetDimensions()  # (I, J, K)
         scalars = imagedata.GetPointData().GetScalars()
-        arr = vns.vtk_to_numpy(scalars).reshape(dims[2], dims[1], dims[0]) != 0
+        labels = vns.vtk_to_numpy(scalars).reshape(dims[2], dims[1], dims[0])  # (K, J, I)
 
-        orig_spacing = imagedata.GetSpacing()  # (i, j, k) in mm
-        stride = tuple(max(1, int(round(spacing_mm / s))) for s in orig_spacing)
-        si, sj, sk = stride
-        K, J, I = arr.shape
-        Kt, Jt, It = (K // sk) * sk, (J // sj) * sj, (I // si) * si
-        if Kt == 0 or Jt == 0 or It == 0:
-            raise RuntimeError(
-                "Particle spacing is larger than the segment extent."
-            )
-        blocks = arr[:Kt, :Jt, :It].reshape(
-            Kt // sk, sk, Jt // sj, sj, It // si, si
-        )
-        occupied = blocks.any(axis=(1, 3, 5))  # (Kb, Jb, Ib)
-        kb, jb, ib = np.nonzero(occupied)
-        if ib.size == 0:
+        occ_k, occ_j, occ_i = np.nonzero(labels)
+        if occ_i.size == 0:
             empty = np.empty((0, 3), dtype=np.float32)
             return empty, empty.astype(np.int32), 0.0
-
-        i_c = ib * si + si / 2.0
-        j_c = jb * sj + sj / 2.0
-        k_c = kb * sk + sk / 2.0
-        N = ib.size
 
         M = np.array(
             [[ijk_to_ras.GetElement(r, c) for c in range(4)] for r in range(4)]
         )
-        ijk_h = np.stack([i_c, j_c, k_c, np.ones(N)], axis=0)
-        ras_mm = (M @ ijk_h)[:3].T
-        pos_m = ras_mm / self.SCENE_SCALE_MM
+        ijk_h = np.stack([occ_i, occ_j, occ_k, np.ones(occ_i.size)], axis=0)
+        occ_ras = (M @ ijk_h)[:3].T  # (N, 3) mm
+        ras_min = occ_ras.min(axis=0)
+        ras_max = occ_ras.max(axis=0)
 
-        grid_ijk = np.stack([ib, jb, kb], axis=1).astype(np.int32)
-        spacing_m_iso = float(
-            np.mean([orig_spacing[0] * si, orig_spacing[1] * sj, orig_spacing[2] * sk])
-            / self.SCENE_SCALE_MM
+        n_x = max(1, int(np.floor((ras_max[0] - ras_min[0]) / spacing_mm)) + 1)
+        n_y = max(1, int(np.floor((ras_max[1] - ras_min[1]) / spacing_mm)) + 1)
+        n_z = max(1, int(np.floor((ras_max[2] - ras_min[2]) / spacing_mm)) + 1)
+
+        xs = ras_min[0] + np.arange(n_x) * spacing_mm
+        ys = ras_min[1] + np.arange(n_y) * spacing_mm
+        zs = ras_min[2] + np.arange(n_z) * spacing_mm
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+        flat = X.size
+        cand_ras_h = np.stack(
+            [X.ravel(), Y.ravel(), Z.ravel(), np.ones(flat)], axis=0
         )
-        return pos_m.astype(np.float32), grid_ijk, spacing_m_iso
+
+        M_inv = np.linalg.inv(M)
+        cand_ijk = (M_inv @ cand_ras_h)[:3]  # (3, flat) continuous IJK
+        i_idx = np.round(cand_ijk[0]).astype(np.int64)
+        j_idx = np.round(cand_ijk[1]).astype(np.int64)
+        k_idx = np.round(cand_ijk[2]).astype(np.int64)
+        in_bounds = (
+            (i_idx >= 0) & (i_idx < dims[0])
+            & (j_idx >= 0) & (j_idx < dims[1])
+            & (k_idx >= 0) & (k_idx < dims[2])
+        )
+        occupied = np.zeros(flat, dtype=bool)
+        occupied[in_bounds] = labels[
+            k_idx[in_bounds], j_idx[in_bounds], i_idx[in_bounds]
+        ] != 0
+        if not occupied.any():
+            empty = np.empty((0, 3), dtype=np.float32)
+            return empty, empty.astype(np.int32), 0.0
+
+        pos_mm = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)[occupied]
+        pos_m = (pos_mm / self.SCENE_SCALE_MM).astype(np.float32)
+
+        ix, iy, iz = np.meshgrid(
+            np.arange(n_x), np.arange(n_y), np.arange(n_z), indexing="ij"
+        )
+        grid_ijk = np.stack(
+            [ix.ravel(), iy.ravel(), iz.ravel()], axis=1
+        )[occupied].astype(np.int32)
+
+        spacing_m_iso = float(spacing_mm) / self.SCENE_SCALE_MM
+        return pos_m, grid_ijk, spacing_m_iso
 
     @staticmethod
     def _enumerateGridEdges(grid_ijk, connectivity):
