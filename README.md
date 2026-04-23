@@ -36,16 +36,11 @@ Planned next:
 
 ## Loading the module
 
-Two options — **B is simpler**.
+1. Drag-and-drop `NewtonPhysics` folder to the application screen.
+2. Click `OK` (to proceed with loading Python-scripted modules in that folder)
+3. Click `Yes` (to load it immediately and make the module always load automatically)
 
-**A. Via Developer Tools For Extensions**
-
-1. Install the `DeveloperToolsForExtensions` extension from the Slicer
-   Extensions Manager, restart.
-2. In that module, click **Load module** and pick
-   `E:/Slicer3D/SlicerNewton/NewtonPhysics/NewtonPhysics.py`.
-
-**B. Add as an additional module path (persistent across restarts)**
+If this does not work for any reason then add the module's folder manually to additional moudule paths:
 
 1. **Edit → Application Settings → Modules**.
 2. Under **Additional module paths**, add
@@ -55,19 +50,8 @@ Two options — **B is simpler**.
 
 ## Installing Newton
 
-1. Open the module panel. Find the **Installation** section.
-2. Default **Source** is `newton[sim,importers]` (pulls from PyPI). For
-   an editable local install of your working copy, change it to e.g.
-   `-e G:/warp/newton[sim,importers]`.
-3. Click **Install Newton into Slicer's Python**. Takes a few minutes on
-   first run.
-
-Alternative (from a shell):
-
-```bash
-"C:/Users/korze/AppData/Local/slicer.org/3D Slicer 5.10.0/bin/PythonSlicer.exe" \
-    -m pip install -e G:/warp/newton[sim,importers]
-```
+1. Go to `Newton Physics` module
+2. Click 3**Install Newton into Slicer's Python** button. Takes a few minutes on first run.
 
 ## Iteration workflow
 
@@ -218,8 +202,22 @@ layer stays frozen; the surface drifts downward via the skinning.
 - **Ground far from organ** — segmentations live in RAS mm; Newton
   ground plane is at `z = 0` m (Slicer z = 0). If your organ is at
   z ≈ 1800 mm, pin the top or expect a long fall.
+- If Newton installation fails, it can be installed from a terminal:
 
-## Build as an installable extension
+```bash
+"C:/Users/korze/AppData/Local/slicer.org/3D Slicer 5.10.0/bin/PythonSlicer.exe" \
+    -m pip install -e G:/warp/newton[sim,importers]
+```
+
+## For developers
+
+### Newton installation
+
+Default **Source** is `newton[sim,importers]` (pulls from PyPI).
+For an editable local install of your working copy, change it to e.g.
+   `-e G:/warp/newton[sim,importers]`.
+
+### Build as an installable extension
 
 ```bash
 cmake -S E:/Slicer3D/SlicerNewton -B E:/Slicer3D/SlicerNewton-build ^
